@@ -1,0 +1,53 @@
+name: Auto-Bump & Build Quest NoodleExtensions (1.45.3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_bs_version:
+        description: 'Target moddable Quest Beat Saber version'
+        required: true
+        default: '1.45.3'
+
+jobs:
+  bump-and-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone bsq-ports/NoodleExtensions
+        uses: actions/checkout@v4
+        with:
+          repository: bsq-ports/NoodleExtensions
+          submodules: recursive
+          path: noodle-repo
+
+      - name: Install QPM (Quest Package Manager)
+        run: |
+          curl -L https://github.com -o /usr/local/bin/qpm
+          chmod +x /usr/local/bin/qpm
+
+      - name: Update target Beat Saber version & dependencies in repo files
+        working-directory: noodle-repo
+        run: |
+          TARGET_VER="${{ github.event.inputs.target_bs_version }}"
+          echo "Updating project files to target Beat Saber $TARGET_VER..."
+
+          # Update packageVersion in mod.template.json and qpm.json
+          sed -i "s/\"packageVersion\": \"[0-9.]*\"/\"packageVersion\": \"$TARGET_VER\"/g" mod.template.json || true
+          sed -i "s/\"packageVersion\": \"[0-9.]*\"/\"packageVersion\": \"$TARGET_VER\"/g" qpm.json || true
+
+          # Restore & update QPM dependencies to latest available versions for the target
+          qpm restore
+
+      - name: Configure Android NDK & Build .qmod
+        working-directory: noodle-repo
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          # Build the shared library (.so) and package into .qmod
+          qpm qmod build
+
+      - name: Upload compiled .qmod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoodleExtensions-${{ github.event.inputs.target_bs_version }}-qmod
+          path: noodle-repo/*.qmod
+          retention-days: 14
