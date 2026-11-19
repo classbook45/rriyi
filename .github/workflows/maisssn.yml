@@ -1,0 +1,106 @@
+name: Auto-Bump & Build Quest NoodleExtensions (1.45.3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_bs_version:
+        description: 'Target moddable Quest Beat Saber version'
+        required: true
+        default: '1.45.3'
+
+jobs:
+  bump-and-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone bsq-ports/NoodleExtensions
+        uses: actions/checkout@v4
+        with:
+          repository: bsq-ports/NoodleExtensions
+          submodules: recursive
+          path: noodle-repo
+
+      - name: Install QPM CLI (Linux)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/qpm-dl
+          gh release download --repo QuestPackageManager/QPM.CLI --pattern "qpm-linux-x64.zip" --dir /tmp/qpm-dl
+          unzip -o /tmp/qpm-dl/qpm-linux-x64.zip -d /tmp/qpm-dl/extracted
+          QPM_BIN=$(find /tmp/qpm-dl/extracted -type f -name "qpm*" | head -n 1)
+          sudo mv "$QPM_BIN" /usr/local/bin/qpm
+          sudo chmod +x /usr/local/bin/qpm
+          qpm --version
+
+      - name: Update target Beat Saber version & dependencies in repo files
+        working-directory: noodle-repo
+        env:
+          TARGET_VER: ${{ github.event.inputs.target_bs_version }}
+        run: |
+          export MAJOR_MINOR=$(echo "$TARGET_VER" | awk -F. '{printf "%d%02d", $2, $3}')
+          echo "Updating project files to target Beat Saber $TARGET_VER (cordl: ${MAJOR_MINOR}.*)..."
+
+          python3 - << 'EOF'
+          import json, os, urllib.request
+
+          target_ver = os.environ.get("TARGET_VER", "1.45.3")
+          cordl_prefix = os.environ.get("MAJOR_MINOR", "4503")
+
+          # 1. Update mod.template.json
+          if os.path.exists("mod.template.json"):
+              with open("mod.template.json", "r") as f:
+                  mod = json.load(f)
+              mod["packageVersion"] = target_ver
+              with open("mod.template.json", "w") as f:
+                  json.dump(mod, f, indent=2)
+
+          # 2. Update qpm.json dependencies
+          with open("qpm.json", "r") as f:
+              qpm = json.load(f)
+
+          if os.path.exists("qpm.shared.json"):
+              os.remove("qpm.shared.json")
+
+          for dep in qpm.get("dependencies", []):
+              pkg_id = dep.get("id", "")
+              if pkg_id == "bs-cordl":
+                  dep["versionRange"] = f"{cordl_prefix}.*"
+              elif pkg_id == "beatsaber-hook":
+                  dep["versionRange"] = "^9.1.1"
+              else:
+                  # Fetch latest version from qpackages.com API
+                  try:
+                      url = f"https://qpackages.com{pkg_id}?limit=1"
+                      req = urllib.request.urlopen(url, timeout=10)
+                      versions = json.loads(req.read().decode())
+                      if versions and isinstance(versions, list):
+                          latest = versions[0].get("version")
+                          if latest:
+                              dep["versionRange"] = f"^{latest}"
+                              print(f"Updated {pkg_id} -> ^{latest}")
+                  except Exception as e:
+                      print(f"Keeping existing range for {pkg_id} ({dep.get('versionRange')}): {e}")
+
+          with open("qpm.json", "w") as f:
+              json.dump(qpm, f, indent=2)
+
+          print("=== Updated qpm.json ===")
+          print(json.dumps(qpm, indent=2))
+          EOF
+
+          # Restore updated QPM dependencies
+          qpm restore
+
+      - name: Configure Android NDK & Build .qmod
+        working-directory: noodle-repo
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          pwsh ./scripts/build.ps1 --release
+          pwsh ./scripts/createqmod.ps1
+
+      - name: Upload compiled .qmod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoodleExtensions-${{ github.event.inputs.target_bs_version }}-qmod
+          path: noodle-repo/*.qmod
+          retention-days: 14
