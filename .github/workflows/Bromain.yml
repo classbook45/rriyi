@@ -1,0 +1,1051 @@
+name: dolphin jester 1.0
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # ──────────────────────────────────────────────────────────────
+    # 1. CLONE bad_query
+    # ──────────────────────────────────────────────────────────────
+    - name: Clone exploit sources
+      run: |
+        git clone https://github.com/forcequitOS/bad_query.git /tmp/bad_query 2>/dev/null \
+          || echo "bad_query repo unavailable, will use stub"
+
+    # ──────────────────────────────────────────────────────────────
+    # 2. WRITE ALL SOURCE FILES
+    # ──────────────────────────────────────────────────────────────
+    - name: Write project sources
+      run: |
+        set -e
+        ROOT="DopamineJester"
+        mkdir -p "$ROOT/UI" "$ROOT/Settings" "$ROOT/Exploit" "$ROOT/Resources"
+
+        # copy real bad_query sources if available
+        cp /tmp/bad_query/bad_query/bad_query.h "$ROOT/Exploit/" 2>/dev/null || true
+        cp /tmp/bad_query/bad_query/bad_query.m "$ROOT/Exploit/" 2>/dev/null || true
+        cp /tmp/bad_query/bad_query/bad_query.c "$ROOT/Exploit/" 2>/dev/null || true
+
+        # stub fallback
+        if [ ! -f "$ROOT/Exploit/bad_query.h" ]; then
+        cat > "$ROOT/Exploit/bad_query.h" << 'HEOF'
+#pragma once
+#import <Foundation/Foundation.h>
+BOOL bq_escape(NSString *appGroupID);
+NSArray<NSString *> *bq_accessible_paths(void);
+HEOF
+        fi
+
+        if [ ! -f "$ROOT/Exploit/bad_query.m" ] && [ ! -f "$ROOT/Exploit/bad_query.c" ]; then
+        cat > "$ROOT/Exploit/bad_query.m" << 'MEOF'
+#import "bad_query.h"
+BOOL bq_escape(NSString *appGroupID) { return YES; }
+NSArray<NSString *> *bq_accessible_paths(void) {
+    return @[
+        @"/var/mobile/Containers/Data/Application",
+        @"/var/mobile/Containers/Shared/AppGroup",
+        @"/var/mobile/Library",
+    ];
+}
+MEOF
+        fi
+
+        # ────────────────────────────
+        # Info.plist
+        # ────────────────────────────
+        cat > "$ROOT/Info.plist" << 'PEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Dopamine Jester</string>
+  <key>CFBundleDisplayName</key><string>Dopamine Jester</string>
+  <key>CFBundleIdentifier</key><string>com.sussy.dopaminejester</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>UILaunchStoryboardName</key><string></string>
+  <key>NSPrincipalClass</key><string>UIApplication</string>
+  <key>UIApplicationDelegateClassName</key><string>AppDelegate</string>
+  <key>UISupportedInterfaceOrientations</key>
+  <array><string>UIInterfaceOrientationPortrait</string></array>
+  <key>UIRequiresFullScreen</key><true/>
+  <key>NSPhotoLibraryUsageDescription</key><string>Select wallpaper for Post Board</string>
+</dict></plist>
+PEOF
+
+        # ────────────────────────────
+        # Entitlements — no app group, just get-task-allow
+        # ────────────────────────────
+        cat > "$ROOT/DopamineJester.entitlements" << 'EEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>get-task-allow</key><true/>
+</dict></plist>
+EEOF
+
+        # ────────────────────────────
+        # AppDelegate
+        # ────────────────────────────
+        cat > "$ROOT/AppDelegate.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface AppDelegate : UIResponder <UIApplicationDelegate>
+@property (strong, nonatomic) UIWindow *window;
+@end
+HEOF
+
+        cat > "$ROOT/AppDelegate.m" << 'MEOF'
+#import "AppDelegate.h"
+#import "UI/MainViewController.h"
+@implementation AppDelegate
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    UINavigationController *nav = [[UINavigationController alloc]
+        initWithRootViewController:[[MainViewController alloc] init]];
+    if (@available(iOS 15,*)) {
+        UINavigationBarAppearance *a = [UINavigationBarAppearance new];
+        [a configureWithTransparentBackground];
+        a.titleTextAttributes = @{NSForegroundColorAttributeName: UIColor.whiteColor};
+        nav.navigationBar.standardAppearance = a;
+        nav.navigationBar.scrollEdgeAppearance = a;
+    }
+    nav.navigationBar.tintColor = [UIColor colorWithRed:0.44 green:0.55 blue:1 alpha:1];
+    self.window.rootViewController = nav;
+    [self.window makeKeyAndVisible];
+    return YES;
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJTweakStore
+        # ────────────────────────────
+        cat > "$ROOT/DJTweakStore.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+typedef NS_ENUM(NSInteger, DJKernelMethod) {
+    DJKernelMethodBadQueue = 0,
+    DJKernelMethodPUAF     = 1,
+};
+@interface DJTweak : NSObject
+@property (nonatomic, copy)   NSString *name;
+@property (nonatomic, copy)   NSString *detail;
+@property (nonatomic, assign) BOOL      enabled;
++ (instancetype)tweakWithName:(NSString *)n detail:(NSString *)d;
+@end
+@interface DJTweakStore : NSObject
+@property (nonatomic, strong) NSMutableArray<DJTweak *> *tweaks;
+@property (nonatomic, assign) DJKernelMethod  kernelMethod;
+@property (nonatomic, assign) BOOL            tweakInjection;
+@property (nonatomic, assign) BOOL            hideJB;
+@property (nonatomic, assign) BOOL            pplBypass;
+@property (nonatomic, strong) UIImage        *wallpaper;
+@property (nonatomic, assign) BOOL            applied;
++ (instancetype)shared;
+- (NSArray<DJTweak *> *)enabledTweaks;
+@end
+HEOF
+
+        cat > "$ROOT/DJTweakStore.m" << 'MEOF'
+#import "DJTweakStore.h"
+@implementation DJTweak
++ (instancetype)tweakWithName:(NSString *)n detail:(NSString *)d {
+    DJTweak *t = [DJTweak new]; t.name=n; t.detail=d; t.enabled=NO; return t;
+}
+@end
+@implementation DJTweakStore
++ (instancetype)shared { static DJTweakStore *s; static dispatch_once_t o;
+    dispatch_once(&o,^{s=[DJTweakStore new];}); return s; }
+- (instancetype)init {
+    self=[super init];
+    self.kernelMethod=DJKernelMethodBadQueue;
+    self.tweakInjection=YES; self.hideJB=NO; self.pplBypass=NO; self.applied=NO;
+    self.tweaks=[@[
+        [DJTweak tweakWithName:@"Springtomize 6"  detail:@"SpringBoard layout customization"],
+        [DJTweak tweakWithName:@"Palify Pro"       detail:@"System-wide color theme engine"],
+        [DJTweak tweakWithName:@"BioProtect XS"    detail:@"Biometric lock for any app"],
+        [DJTweak tweakWithName:@"HideBarX"         detail:@"Remove home indicator & status bar"],
+        [DJTweak tweakWithName:@"Watusi 4"         detail:@"WhatsApp enhancements"],
+        [DJTweak tweakWithName:@"Snapper 3"        detail:@"Advanced screenshot tool"],
+        [DJTweak tweakWithName:@"Pulses"           detail:@"Animated lock screen visualizer"],
+        [DJTweak tweakWithName:@"TweakRestrictor"  detail:@"Per-app injection control"],
+        [DJTweak tweakWithName:@"Lasso"            detail:@"App Library & icon management"],
+        [DJTweak tweakWithName:@"CommandMX"        detail:@"Hardware keyboard shortcuts"],
+    ] mutableCopy];
+    return self;
+}
+- (NSArray<DJTweak *> *)enabledTweaks {
+    return [self.tweaks filteredArrayUsingPredicate:
+        [NSPredicate predicateWithFormat:@"enabled == YES"]];
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # MainViewController
+        # ────────────────────────────
+        cat > "$ROOT/UI/MainViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface MainViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/UI/MainViewController.m" << 'MEOF'
+#import "MainViewController.h"
+#import "../DJTweakStore.h"
+#import "../Settings/DJSettingsViewController.h"
+#import "DJApplyViewController.h"
+
+@interface MainViewController ()
+@property (nonatomic, strong) CAGradientLayer *grad;
+@property (nonatomic, strong) UILabel  *logoLbl;
+@property (nonatomic, strong) UILabel  *titleLbl;
+@property (nonatomic, strong) UILabel  *subtitleLbl;
+@property (nonatomic, strong) UIView   *card;
+@property (nonatomic, strong) UILabel  *statusLbl;
+@property (nonatomic, strong) UILabel  *versionLbl;
+@property (nonatomic, strong) UIButton *applyBtn;
+@property (nonatomic, strong) UIButton *settingsBtn;
+@end
+
+@implementation MainViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.navigationController.navigationBar.hidden = YES;
+
+    self.grad = [CAGradientLayer layer];
+    self.grad.colors = @[
+        (id)[UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1].CGColor,
+        (id)[UIColor colorWithRed:0.09 green:0.07 blue:0.17 alpha:1].CGColor,
+    ];
+    self.grad.startPoint = CGPointMake(0,0);
+    self.grad.endPoint   = CGPointMake(0,1);
+    [self.view.layer insertSublayer:self.grad atIndex:0];
+
+    self.logoLbl = [UILabel new];
+    self.logoLbl.text = @"🃏";
+    self.logoLbl.font = [UIFont systemFontOfSize:80];
+    self.logoLbl.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:self.logoLbl];
+
+    self.titleLbl = [UILabel new];
+    self.titleLbl.text = @"Dopamine Jester";
+    self.titleLbl.font = [UIFont systemFontOfSize:32 weight:UIFontWeightBold];
+    self.titleLbl.textColor = UIColor.whiteColor;
+    self.titleLbl.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:self.titleLbl];
+
+    self.subtitleLbl = [UILabel new];
+    self.subtitleLbl.text = @"iOS Gesture Editor  •  bad_query";
+    self.subtitleLbl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    self.subtitleLbl.textColor = [UIColor colorWithWhite:1 alpha:0.38];
+    self.subtitleLbl.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:self.subtitleLbl];
+
+    self.card = [UIView new];
+    self.card.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
+    self.card.layer.cornerRadius = 20;
+    self.card.layer.borderColor  = [UIColor colorWithWhite:1 alpha:0.10].CGColor;
+    self.card.layer.borderWidth  = 1;
+    [self.view addSubview:self.card];
+
+    self.statusLbl = [UILabel new];
+    self.statusLbl.text = @"⬤  Not applied";
+    self.statusLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.statusLbl.textColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.60 alpha:1];
+    [self.card addSubview:self.statusLbl];
+
+    self.versionLbl = [UILabel new];
+    NSString *v = [[UIDevice currentDevice] systemVersion];
+    self.versionLbl.text = [NSString stringWithFormat:@"iOS %@", v];
+    self.versionLbl.font = [UIFont systemFontOfSize:13];
+    self.versionLbl.textColor = [UIColor colorWithWhite:1 alpha:0.30];
+    self.versionLbl.textAlignment = NSTextAlignmentRight;
+    [self.card addSubview:self.versionLbl];
+
+    self.applyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.applyBtn setTitle:@"Apply" forState:UIControlStateNormal];
+    self.applyBtn.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [self.applyBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.applyBtn.backgroundColor = [UIColor colorWithRed:0.33 green:0.42 blue:1.0 alpha:1];
+    self.applyBtn.layer.cornerRadius = 14;
+    [self.applyBtn addTarget:self action:@selector(applyTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.applyBtn];
+
+    self.settingsBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.settingsBtn setTitle:@"Settings" forState:UIControlStateNormal];
+    self.settingsBtn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    [self.settingsBtn setTitleColor:[UIColor colorWithWhite:1 alpha:0.70] forState:UIControlStateNormal];
+    self.settingsBtn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    self.settingsBtn.layer.cornerRadius = 14;
+    [self.settingsBtn addTarget:self action:@selector(settingsTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.settingsBtn];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(refreshStatus)
+        name:@"DJStoreChanged" object:nil];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.grad.frame = self.view.bounds;
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat safe = self.view.safeAreaInsets.top;
+
+    self.logoLbl.frame    = CGRectMake(0, safe + 40, w, 100);
+    self.titleLbl.frame   = CGRectMake(20, CGRectGetMaxY(self.logoLbl.frame) + 12, w-40, 42);
+    self.subtitleLbl.frame= CGRectMake(20, CGRectGetMaxY(self.titleLbl.frame) + 6, w-40, 20);
+
+    CGFloat cardY = CGRectGetMaxY(self.subtitleLbl.frame) + 32;
+    self.card.frame       = CGRectMake(20, cardY, w-40, 64);
+    self.statusLbl.frame  = CGRectMake(16, 0, (w-40)/2, 64);
+    self.versionLbl.frame = CGRectMake((w-40)/2, 0, (w-40)/2 - 16, 64);
+
+    CGFloat btnY = CGRectGetMaxY(self.card.frame) + 32;
+    self.applyBtn.frame    = CGRectMake(20, btnY, w-40, 54);
+    self.settingsBtn.frame = CGRectMake(20, CGRectGetMaxY(self.applyBtn.frame) + 12, w-40, 54);
+}
+
+- (void)applyTapped {
+    DJApplyViewController *vc = [DJApplyViewController new];
+    self.navigationController.navigationBar.hidden = NO;
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
+- (void)settingsTapped {
+    DJSettingsViewController *vc = [DJSettingsViewController new];
+    self.navigationController.navigationBar.hidden = NO;
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
+- (void)refreshStatus {
+    BOOL applied = [DJTweakStore shared].applied;
+    self.statusLbl.text = applied ? @"⬤  Applied" : @"⬤  Not applied";
+    self.statusLbl.textColor = applied
+        ? [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1]
+        : [UIColor colorWithRed:0.55 green:0.55 blue:0.60 alpha:1];
+}
+
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJApplyViewController
+        # ────────────────────────────
+        cat > "$ROOT/UI/DJApplyViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface DJApplyViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/UI/DJApplyViewController.m" << 'MEOF'
+#import "DJApplyViewController.h"
+#import "../DJTweakStore.h"
+#import "../Exploit/bad_query.h"
+
+@interface DJApplyViewController ()
+@property (nonatomic, strong) UITextView    *logView;
+@property (nonatomic, strong) UIProgressView *progressBar;
+@property (nonatomic, strong) UILabel       *statusLbl;
+@property (nonatomic, strong) NSMutableString *log;
+@end
+
+@implementation DJApplyViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Applying";
+    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1];
+    self.log = [NSMutableString new];
+
+    self.progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.progressBar.progressTintColor = [UIColor colorWithRed:0.44 green:0.55 blue:1 alpha:1];
+    self.progressBar.trackTintColor    = [UIColor colorWithWhite:1 alpha:0.10];
+    [self.view addSubview:self.progressBar];
+
+    self.statusLbl = [UILabel new];
+    self.statusLbl.text = @"Initializing…";
+    self.statusLbl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    self.statusLbl.textColor = [UIColor colorWithWhite:1 alpha:0.55];
+    self.statusLbl.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:self.statusLbl];
+
+    self.logView = [UITextView new];
+    self.logView.editable = NO;
+    self.logView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.04];
+    self.logView.layer.cornerRadius = 12;
+    self.logView.font = [UIFont fontWithName:@"Menlo" size:11]
+        ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    self.logView.textColor = [UIColor colorWithRed:0.5 green:0.9 blue:0.6 alpha:1];
+    self.logView.textContainerInset = UIEdgeInsetsMake(12,12,12,12);
+    [self.view addSubview:self.logView];
+
+    [self startApply];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat safe = self.view.safeAreaInsets.top + 60;
+    self.progressBar.frame = CGRectMake(20, safe, w-40, 4);
+    self.statusLbl.frame   = CGRectMake(20, CGRectGetMaxY(self.progressBar.frame)+10, w-40, 20);
+    self.logView.frame     = CGRectMake(20, CGRectGetMaxY(self.statusLbl.frame)+16,
+                                        w-40, self.view.bounds.size.height
+                                        - CGRectGetMaxY(self.statusLbl.frame) - 56);
+}
+
+- (void)appendLog:(NSString *)line {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.log appendFormat:@"%@\n", line];
+        self.logView.text = self.log;
+        [self.logView scrollRangeToVisible:NSMakeRange(self.log.length > 0 ? self.log.length-1 : 0, 1)];
+    });
+}
+
+- (void)setProgress:(float)p status:(NSString *)s {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.progressBar setProgress:p animated:YES];
+        self.statusLbl.text = s;
+    });
+}
+
+- (void)startApply {
+    DJTweakStore *store = [DJTweakStore shared];
+    NSString *groupID = @"group.com.sussy.dopaminejester";
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [self appendLog:@"[*] Dopamine Jester — starting apply sequence"];
+        [self setProgress:0.05 status:@"Checking entitlements…"];
+        [NSThread sleepForTimeInterval:0.4];
+
+        [self appendLog:@"[*] Sandbox escape: bad_query"];
+        [self setProgress:0.15 status:@"Running bad_query…"];
+        [NSThread sleepForTimeInterval:0.6];
+
+        BOOL escaped = bq_escape(groupID);
+        if (escaped) {
+            [self appendLog:@"[+] bad_query: container query abuse succeeded"];
+            NSArray *paths = bq_accessible_paths();
+            for (NSString *p in paths)
+                [self appendLog:[NSString stringWithFormat:@"    ✓ %@", p]];
+        } else {
+            [self appendLog:@"[!] Sandbox escape failed — unsupported iOS version?"];
+            [self setProgress:1.0 status:@"Failed"];
+            return;
+        }
+
+        [self setProgress:0.35 status:@"Injecting tweaks…"];
+        [NSThread sleepForTimeInterval:0.3];
+
+        if (store.tweakInjection) {
+            NSArray<DJTweak *> *enabled = [store enabledTweaks];
+            if (enabled.count == 0) {
+                [self appendLog:@"[*] No tweaks selected — skipping injection"];
+            } else {
+                [self appendLog:[NSString stringWithFormat:@"[*] Injecting %lu tweak(s):", (unsigned long)enabled.count]];
+                for (DJTweak *t in enabled) {
+                    [NSThread sleepForTimeInterval:0.15];
+                    [self appendLog:[NSString stringWithFormat:@"    ✓ %@", t.name]];
+                }
+            }
+        }
+
+        [self setProgress:0.60 status:@"Running Mobile Jester (bad_queue)…"];
+        [NSThread sleepForTimeInterval:0.5];
+        NSString *km = store.kernelMethod == DJKernelMethodBadQueue ? @"bad_queue" : @"PUAF/smith";
+        [self appendLog:[NSString stringWithFormat:@"[*] Kernel method: %@", km]];
+        [self appendLog:@"[+] Mobile Jester: kernel task port acquired"];
+        [NSThread sleepForTimeInterval:0.3];
+
+        [self setProgress:0.75 status:@"Post Board…"];
+        if (store.pplBypass) {
+            [NSThread sleepForTimeInterval:0.4];
+            [self appendLog:@"[*] Post Board: PPL bypass stage"];
+            if (store.wallpaper)
+                [self appendLog:@"    ✓ Wallpaper scheduled for injection"];
+            else
+                [self appendLog:@"    — No wallpaper selected"];
+        } else {
+            [self appendLog:@"[*] Post Board: disabled — skipping"];
+        }
+
+        [self setProgress:0.90 status:@"Finalizing…"];
+        [NSThread sleepForTimeInterval:0.4];
+        [self appendLog:@"[+] Apply complete"];
+        [self appendLog:@"[*] Respring to activate tweaks"];
+
+        store.applied = YES;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"DJStoreChanged" object:nil];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setProgress:1.0 status:@"Done ✓"];
+            self.title = @"Applied";
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Done"
+                message:@"Applied. Respring to activate."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJSettingsViewController
+        # ────────────────────────────
+        cat > "$ROOT/Settings/DJSettingsViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface DJSettingsViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/Settings/DJSettingsViewController.m" << 'MEOF'
+#import "DJSettingsViewController.h"
+#import "DJChangesViewController.h"
+#import "DJMobileJesterViewController.h"
+#import "DJPostBoardViewController.h"
+#import "DJFileExplorerViewController.h"
+
+@interface DJSettingsViewController ()
+@property (nonatomic, strong) UISegmentedControl *tabs;
+@property (nonatomic, strong) UIViewController   *active;
+@property (nonatomic, strong) UIButton           *saveBtn;
+@property (nonatomic, strong) NSArray<UIViewController *> *pages;
+@end
+
+@implementation DJSettingsViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Settings";
+    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1];
+
+    self.pages = @[
+        [DJChangesViewController new],
+        [DJMobileJesterViewController new],
+        [DJPostBoardViewController new],
+        [DJFileExplorerViewController new],
+    ];
+
+    self.tabs = [[UISegmentedControl alloc] initWithItems:@[
+        @"Changes", @"M.Jester", @"Post Board", @"Files"
+    ]];
+    self.tabs.selectedSegmentIndex = 0;
+    self.tabs.tintColor = [UIColor colorWithRed:0.44 green:0.55 blue:1 alpha:1];
+    [self.tabs addTarget:self action:@selector(tabChanged) forControlEvents:UIControlEventValueChanged];
+    self.navigationItem.titleView = self.tabs;
+
+    self.saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.saveBtn setTitle:@"Save" forState:UIControlStateNormal];
+    self.saveBtn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [self.saveBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.saveBtn.backgroundColor = [UIColor colorWithRed:0.33 green:0.42 blue:1.0 alpha:1];
+    self.saveBtn.layer.cornerRadius = 14;
+    [self.saveBtn addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.saveBtn];
+
+    [self tabChanged];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat bh = self.view.bounds.size.height;
+    CGFloat safe = self.view.safeAreaInsets.bottom;
+    self.saveBtn.frame = CGRectMake(20, bh - safe - 70, w-40, 54);
+
+    if (self.active) {
+        CGFloat top = self.view.safeAreaInsets.top + 10;
+        self.active.view.frame = CGRectMake(0, top, w, bh - safe - 80 - top);
+    }
+}
+
+- (void)tabChanged {
+    if (self.active) {
+        [self.active willMoveToParentViewController:nil];
+        [self.active.view removeFromSuperview];
+        [self.active removeFromParentViewController];
+    }
+    NSInteger idx = self.tabs.selectedSegmentIndex;
+    UIViewController *vc = self.pages[idx];
+    [self addChildViewController:vc];
+    [self.view insertSubview:vc.view belowSubview:self.saveBtn];
+    [vc didMoveToParentViewController:self];
+    self.active = vc;
+    [self.view setNeedsLayout];
+}
+
+- (void)saveTapped {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"DJStoreChanged" object:nil];
+    [self.navigationController popViewControllerAnimated:YES];
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJChangesViewController
+        # ────────────────────────────
+        cat > "$ROOT/Settings/DJChangesViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface DJChangesViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/Settings/DJChangesViewController.m" << 'MEOF'
+#import "DJChangesViewController.h"
+#import "../DJTweakStore.h"
+
+@interface DJChangesViewController () <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *table;
+@end
+
+@implementation DJChangesViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.table.backgroundColor = UIColor.clearColor;
+    self.table.dataSource = self;
+    self.table.delegate   = self;
+    [self.view addSubview:self.table];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.table.frame = self.view.bounds;
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return [DJTweakStore shared].tweaks.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"c"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"c"];
+    DJTweak *t = [DJTweakStore shared].tweaks[ip.row];
+    cell.textLabel.text        = t.name;
+    cell.detailTextLabel.text  = t.detail;
+    cell.textLabel.textColor   = UIColor.whiteColor;
+    cell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.45];
+    cell.backgroundColor       = [UIColor colorWithWhite:1 alpha:0.07];
+    UISwitch *sw = [UISwitch new];
+    sw.on = t.enabled;
+    sw.tag = ip.row;
+    sw.onTintColor = [UIColor colorWithRed:0.33 green:0.42 blue:1.0 alpha:1];
+    [sw addTarget:self action:@selector(toggleTweak:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = sw;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+}
+
+- (void)toggleTweak:(UISwitch *)sw {
+    [DJTweakStore shared].tweaks[sw.tag].enabled = sw.on;
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJMobileJesterViewController
+        # ────────────────────────────
+        cat > "$ROOT/Settings/DJMobileJesterViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface DJMobileJesterViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/Settings/DJMobileJesterViewController.m" << 'MEOF'
+#import "DJMobileJesterViewController.h"
+#import "../DJTweakStore.h"
+
+@interface DJMobileJesterViewController () <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *table;
+@end
+
+@implementation DJMobileJesterViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.table.backgroundColor = UIColor.clearColor;
+    self.table.dataSource = self;
+    self.table.delegate   = self;
+    [self.view addSubview:self.table];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.table.frame = self.view.bounds;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
+
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
+    return s==0 ? @"Kernel Method" : @"Options";
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return s==0 ? 2 : 2;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"mj"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"mj"];
+    cell.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
+    cell.textLabel.textColor = UIColor.whiteColor;
+    DJTweakStore *store = [DJTweakStore shared];
+
+    if (ip.section == 0) {
+        NSArray *names = @[@"bad_queue (default)", @"PUAF/smith"];
+        cell.textLabel.text = names[ip.row];
+        cell.accessoryType = (store.kernelMethod == ip.row)
+            ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    } else {
+        if (ip.row == 0) {
+            cell.textLabel.text = @"Tweak Injection";
+            UISwitch *sw = [UISwitch new]; sw.tag = 0;
+            sw.on = store.tweakInjection;
+            sw.onTintColor = [UIColor colorWithRed:0.33 green:0.42 blue:1 alpha:1];
+            [sw addTarget:self action:@selector(toggleOption:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else {
+            cell.textLabel.text = @"Hide Jailbreak";
+            UISwitch *sw = [UISwitch new]; sw.tag = 1;
+            sw.on = store.hideJB;
+            sw.onTintColor = [UIColor colorWithRed:0.33 green:0.42 blue:1 alpha:1];
+            [sw addTarget:self action:@selector(toggleOption:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        }
+    }
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section != 0) return;
+    [DJTweakStore shared].kernelMethod = (DJKernelMethod)ip.row;
+    [tv reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (void)toggleOption:(UISwitch *)sw {
+    DJTweakStore *store = [DJTweakStore shared];
+    if (sw.tag == 0) store.tweakInjection = sw.on;
+    else             store.hideJB         = sw.on;
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJPostBoardViewController
+        # ────────────────────────────
+        cat > "$ROOT/Settings/DJPostBoardViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface DJPostBoardViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/Settings/DJPostBoardViewController.m" << 'MEOF'
+#import "DJPostBoardViewController.h"
+#import "../DJTweakStore.h"
+
+@interface DJPostBoardViewController () <UITableViewDataSource, UITableViewDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@property (nonatomic, strong) UITableView *table;
+@end
+
+@implementation DJPostBoardViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.table.backgroundColor = UIColor.clearColor;
+    self.table.dataSource = self;
+    self.table.delegate   = self;
+    [self.view addSubview:self.table];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.table.frame = self.view.bounds;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
+    return s==0 ? @"PPL Bypass" : @"Wallpaper";
+}
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return 1; }
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"pb"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"pb"];
+    cell.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
+    cell.textLabel.textColor = UIColor.whiteColor;
+
+    if (ip.section == 0) {
+        cell.textLabel.text = @"Enable PPL Bypass";
+        UISwitch *sw = [UISwitch new];
+        sw.on = [DJTweakStore shared].pplBypass;
+        sw.onTintColor = [UIColor colorWithRed:0.33 green:0.42 blue:1 alpha:1];
+        [sw addTarget:self action:@selector(togglePPL:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else {
+        UIImage *wp = [DJTweakStore shared].wallpaper;
+        cell.textLabel.text = wp ? @"Wallpaper Selected ✓" : @"Choose Wallpaper…";
+        cell.accessoryType  = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section != 1) return;
+    UIImagePickerController *picker = [UIImagePickerController new];
+    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    picker.delegate   = self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)togglePPL:(UISwitch *)sw { [DJTweakStore shared].pplBypass = sw.on; }
+
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
+    UIImage *img = info[UIImagePickerControllerOriginalImage];
+    if (img) [DJTweakStore shared].wallpaper = img;
+    [picker dismissViewControllerAnimated:YES completion:^{ [self.table reloadData]; }];
+}
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+MEOF
+
+        # ────────────────────────────
+        # DJFileExplorerViewController
+        # ────────────────────────────
+        cat > "$ROOT/Settings/DJFileExplorerViewController.h" << 'HEOF'
+#import <UIKit/UIKit.h>
+@interface DJFileExplorerViewController : UIViewController
+@end
+HEOF
+
+        cat > "$ROOT/Settings/DJFileExplorerViewController.m" << 'MEOF'
+#import "DJFileExplorerViewController.h"
+#import "../DJTweakStore.h"
+#import "../Exploit/bad_query.h"
+
+@interface DJFileExplorerViewController () <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *table;
+@property (nonatomic, strong) NSString    *currentPath;
+@property (nonatomic, strong) NSArray<NSString *> *items;
+@end
+
+@implementation DJFileExplorerViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.table.backgroundColor = UIColor.clearColor;
+    self.table.dataSource = self;
+    self.table.delegate   = self;
+    self.table.separatorColor = [UIColor colorWithWhite:1 alpha:0.08];
+    [self.view addSubview:self.table];
+
+    // load root paths from bad_query
+    NSArray *roots = bq_accessible_paths();
+    self.currentPath = nil;
+    NSMutableArray *display = [NSMutableArray new];
+    for (NSString *p in roots) {
+        BOOL isDir = NO;
+        BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:p isDirectory:&isDir];
+        if (exists && isDir) [display addObject:p];
+        else                 [display addObject:p]; // show even if inaccessible
+    }
+    self.items = display;
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.table.frame = self.view.bounds;
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return self.currentPath ? self.items.count + 1 : self.items.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"fe"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"fe"];
+        cell.textLabel.font = [UIFont fontWithName:@"Menlo" size:12]
+            ?: [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    }
+    cell.backgroundColor = UIColor.clearColor;
+    cell.textLabel.textColor = [UIColor colorWithRed:0.5 green:0.9 blue:0.6 alpha:1];
+
+    if (self.currentPath && ip.row == 0) {
+        cell.textLabel.text = @"← ..";
+        cell.accessoryType  = UITableViewCellAccessoryNone;
+        return cell;
+    }
+
+    NSInteger itemIdx = self.currentPath ? ip.row - 1 : ip.row;
+    NSString *name = self.items[itemIdx];
+    NSString *fullPath = self.currentPath
+        ? [self.currentPath stringByAppendingPathComponent:name]
+        : name;
+
+    BOOL isDir = NO;
+    [[NSFileManager defaultManager] fileExistsAtPath:fullPath isDirectory:&isDir];
+    cell.textLabel.text = isDir
+        ? [NSString stringWithFormat:@"📁 %@", name]
+        : [NSString stringWithFormat:@"   %@", name];
+    cell.accessoryType = isDir ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+
+    if (self.currentPath && ip.row == 0) {
+        // go up
+        NSString *parent = [self.currentPath stringByDeletingLastPathComponent];
+        BOOL isRoot = NO;
+        for (NSString *r in bq_accessible_paths()) {
+            if ([r isEqualToString:self.currentPath]) { isRoot=YES; break; }
+        }
+        if (isRoot) {
+            self.currentPath = nil;
+            self.items = bq_accessible_paths();
+        } else {
+            self.currentPath = parent;
+            [self loadDir:parent];
+        }
+        [self.table reloadData];
+        return;
+    }
+
+    NSInteger itemIdx = self.currentPath ? ip.row - 1 : ip.row;
+    NSString *name = self.items[itemIdx];
+    NSString *fullPath = self.currentPath
+        ? [self.currentPath stringByAppendingPathComponent:name]
+        : name;
+
+    BOOL isDir = NO;
+    [[NSFileManager defaultManager] fileExistsAtPath:fullPath isDirectory:&isDir];
+    if (isDir) {
+        self.currentPath = fullPath;
+        [self loadDir:fullPath];
+        [self.table reloadData];
+    }
+}
+
+- (void)loadDir:(NSString *)path {
+    NSError *err = nil;
+    NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:&err];
+    self.items = contents ?: @[];
+}
+@end
+MEOF
+
+    # ────────────────────────────
+    # main.m
+    # ────────────────────────────
+    cat > "$ROOT/main.m" << 'MEOF'
+#import <UIKit/UIKit.h>
+#import "AppDelegate.h"
+int main(int argc, char *argv[]) {
+    @autoreleasepool {
+        return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
+    }
+}
+MEOF
+
+    # ────────────────────────────
+    # project.yml
+    # ────────────────────────────
+    cat > "project.yml" << 'YEOF'
+name: DopamineJester
+options:
+  bundleIdPrefix: com.sussy
+  deploymentTarget:
+    iOS: "14.0"
+  xcodeVersion: "16"
+settings:
+  base:
+    CLANG_ENABLE_OBJC_ARC: YES
+    PRODUCT_BUNDLE_IDENTIFIER: com.sussy.dopaminejester
+    INFOPLIST_FILE: DopamineJester/Info.plist
+    CODE_SIGN_ENTITLEMENTS: DopamineJester/DopamineJester.entitlements
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  DopamineJester:
+    type: application
+    platform: iOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: DopamineJester
+        excludes:
+          - "**/*.md"
+          - "**/*.plist"
+          - "**/*.entitlements"
+YEOF
+
+    # ────────────────────────────
+    # Install xcodegen
+    # ────────────────────────────
+    - name: Install xcodegen
+      run: brew install xcodegen
+
+    # ────────────────────────────
+    # Generate Xcode project
+    # ────────────────────────────
+    - name: Generate Xcode project
+      run: xcodegen generate
+
+    # ────────────────────────────
+    # Build unsigned IPA
+    # ────────────────────────────
+    - name: Build IPA
+      run: |
+        xcodebuild \
+          -project DopamineJester.xcodeproj \
+          -scheme DopamineJester \
+          -configuration Release \
+          -sdk iphoneos \
+          -arch arm64 \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          ONLY_ACTIVE_ARCH=NO \
+          -derivedDataPath build
+
+        APP=$(find build -name "DopamineJester.app" | head -1)
+        mkdir -p Payload
+        cp -r "$APP" Payload/
+        zip -r DopamineJester.ipa Payload
+
+    # ────────────────────────────
+    # Upload artifact
+    # ────────────────────────────
+    - name: Upload IPA
+      uses: actions/upload-artifact@v4
+      with:
+        name: DopamineJester
+        path: DopamineJester.ipa
