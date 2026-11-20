@@ -1,0 +1,311 @@
+name: port-all
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "full packageVersion"
+        default: "1.45.3_30054"
+        required: true
+      cordl_range:
+        description: "bs-cordl range (blank guesses from game version)"
+        default: ""
+        required: false
+      cjd_url:
+        default: "https://github.com/StackDoubleFlow/CustomJSONData"
+        description: "customjsondata repo"
+        required: true
+      cjd_branch:
+        default: ""
+        description: "customjsondata branch"
+        required: false
+      tracks_url:
+        default: "https://github.com/StackDoubleFlow/Tracks"
+        description: "tracks repo (unverified default)"
+        required: true
+      tracks_branch:
+        default: ""
+        description: "tracks branch"
+        required: false
+      chroma_url:
+        default: "https://github.com/bsq-ports/Chroma"
+        description: "chroma repo"
+        required: true
+      chroma_branch:
+        default: ""
+        description: "chroma branch"
+        required: false
+      noodle_url:
+        default: "https://github.com/bsq-ports/NoodleExtensions"
+        description: "noodle repo"
+        required: true
+      noodle_branch:
+        default: ""
+        description: "noodle branch"
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      PACKAGE_VERSION: ${{ inputs.package_version }}
+      CORDL_RANGE: ${{ inputs.cordl_range }}
+      CJD_URL: ${{ inputs.cjd_url }}
+      CJD_BRANCH: ${{ inputs.cjd_branch }}
+      TRACKS_URL: ${{ inputs.tracks_url }}
+      TRACKS_BRANCH: ${{ inputs.tracks_branch }}
+      CHROMA_URL: ${{ inputs.chroma_url }}
+      CHROMA_BRANCH: ${{ inputs.chroma_branch }}
+      NOODLE_URL: ${{ inputs.noodle_url }}
+      NOODLE_BRANCH: ${{ inputs.noodle_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: validate inputs
+        run: |
+          for u in "$CJD_URL" "$TRACKS_URL" "$CHROMA_URL" "$NOODLE_URL"; do
+            case "$u" in
+              https://github.com/*) ;;
+              *) echo "repo urls must start with https://github.com/"; exit 1 ;;
+            esac
+          done
+          GAME="${PACKAGE_VERSION%%_*}"
+          if ! [[ "$GAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "package_version must look like 1.45.3_30054"; exit 1
+          fi
+          if [ -z "$CORDL_RANGE" ]; then
+            IFS=. read -r MAJ MIN PAT <<< "$GAME"
+            echo "CORDL_RANGE=^$((10#$MIN * 100 + 10#$PAT)).0.0" >> "$GITHUB_ENV"
+          fi
+
+      - name: install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build unzip curl python3
+
+      - name: install qpm
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          URL="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/QuestPackageManager/QPM.CLI/releases/latest \
+            | python3 -c '
+          import json, sys
+          for a in json.load(sys.stdin).get("assets", []):
+              n = a["name"].lower()
+              if "linux" in n and any(k in n for k in ("x64", "x86_64", "amd64")):
+                  print(a["browser_download_url"])
+                  break
+          ')"
+          if [ -z "$URL" ]; then echo "no linux qpm asset found"; exit 1; fi
+          TMP="$(mktemp -d)"
+          curl -fsSL "$URL" -o "$TMP/dl"
+          case "$URL" in
+            *.zip) unzip -o -q "$TMP/dl" -d "$TMP/x" ;;
+            *) mkdir -p "$TMP/x"; cp "$TMP/dl" "$TMP/x/qpm" ;;
+          esac
+          BIN="$(find "$TMP/x" -type f -name 'qpm*' ! -name '*.md' | head -n1)"
+          install -m 755 "$BIN" "$HOME/.local/bin/qpm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: write port script
+        run: |
+          cat > port_all.py <<'PY'
+          import json, os, re, shutil, subprocess, sys, time
+          from collections import Counter
+          from pathlib import Path
+
+          WS = Path(os.environ["GITHUB_WORKSPACE"])
+          PKG = os.environ["PACKAGE_VERSION"]
+          CORDL = os.environ["CORDL_RANGE"]
+          SUMMARY = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          ERR = re.compile(r"^(.*?):(\d+):(\d+): (?:fatal )?error: (.*)$", re.M)
+
+          MODS = [
+              ("customjsondata", os.environ["CJD_URL"], os.environ["CJD_BRANCH"]),
+              ("tracks", os.environ["TRACKS_URL"], os.environ["TRACKS_BRANCH"]),
+              ("chroma", os.environ["CHROMA_URL"], os.environ["CHROMA_BRANCH"]),
+              ("noodle", os.environ["NOODLE_URL"], os.environ["NOODLE_BRANCH"]),
+          ]
+
+
+          def sh(cmd, cwd, log):
+              log.write("$ " + " ".join(cmd) + "\n")
+              p = subprocess.run(
+                  cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                  text=True, errors="replace",
+              )
+              log.write(p.stdout + "\n")
+              log.flush()
+              return p.returncode, p.stdout
+
+
+          def tail(text, n=1500):
+              return text[-n:]
+
+
+          def load(path):
+              with open(path, encoding="utf-8-sig") as f:
+                  return json.load(f)
+
+
+          def save(path, data):
+              with open(path, "w", encoding="utf-8") as f:
+                  json.dump(data, f, indent=2)
+                  f.write("\n")
+
+
+          def has_script(repo, name):
+              try:
+                  scripts = load(repo / "qpm.json").get("workspace", {}).get("scripts", {})
+              except (OSError, ValueError):
+                  return False
+              return name in scripts
+
+
+          def patch(repo):
+              for path in list(repo.glob("*.template.json")) + list(repo.glob("mod.json")):
+                  d = load(path)
+                  if "packageVersion" in d:
+                      d["packageVersion"] = PKG
+                      save(path, d)
+              q = repo / "qpm.json"
+              if q.exists():
+                  d = load(q)
+                  for dep in d.get("dependencies", []):
+                      if dep.get("id") == "bs-cordl":
+                          dep["versionRange"] = CORDL
+                  save(q, d)
+              (repo / "qpm.shared.json").unlink(missing_ok=True)
+
+
+          def clusters(text):
+              errs = ERR.findall(text)
+              if not errs:
+                  return ""
+              kinds = Counter(re.sub(r"'[^']*'", "'_'", m)[:100] for _, _, _, m in errs)
+              files = Counter(p for p, _, _, _ in errs)
+              lines = [f"{len(errs)} compiler errors in {len(files)} files", "", "by type:"]
+              lines += [f"- {n}x `{k}`" for k, n in kinds.most_common(12)]
+              lines += ["", "worst files:"]
+              lines += [f"- {n}x `{p}`" for p, n in files.most_common(8)]
+              return "\n".join(lines)
+
+
+          def build_cmds(repo):
+              if has_script(repo, "build"):
+                  return [["qpm", "s", "build"]]
+              if (repo / "build.ps1").exists():
+                  return [["pwsh", "./build.ps1"]]
+              return [
+                  ["cmake", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-B", "build", "."],
+                  ["cmake", "--build", "build"],
+              ]
+
+
+          def package_cmd(repo, name):
+              if has_script(repo, "qmod"):
+                  return ["qpm", "s", "qmod"]
+              if (repo / "createqmod.ps1").exists():
+                  return ["pwsh", "./createqmod.ps1", name]
+              return ["qpm", "qmod", "zip"]
+
+
+          def build_one(name, url, branch):
+              repo = WS / "src" / name
+              out = WS / "out" / name
+              out.mkdir(parents=True, exist_ok=True)
+              (WS / "logs").mkdir(exist_ok=True)
+              with open(WS / "logs" / f"{name}.log", "w", encoding="utf-8") as log:
+                  clone = ["git", "clone", "--depth", "1"]
+                  if branch:
+                      clone += ["--branch", branch]
+                  rc, text = sh(clone + [url, str(repo)], WS, log)
+                  if rc:
+                      return "clone failed", "check the url and branch", tail(text)
+
+                  patch(repo)
+
+                  rc, text = sh(["qpm", "ndk", "resolve", "-d"], repo, log)
+                  if rc:
+                      return "ndk failed", "ndk resolve did not finish", tail(text)
+
+                  rc, text = sh(["qpm", "restore"], repo, log)
+                  if rc:
+                      note = "a dependency or the bs-cordl range has no match for this version"
+                      return "restore failed", note, tail(text)
+
+                  started = time.time()
+                  for cmd in build_cmds(repo):
+                      rc, text = sh(cmd, repo, log)
+                      if rc:
+                          found = clusters(text)
+                          return "build failed", "source needs manual fixes", found or tail(text)
+
+                  rc, text = sh(package_cmd(repo, name), repo, log)
+                  if rc:
+                      return "package failed", "qmod packaging did not finish", tail(text)
+
+                  count = 0
+                  for f in repo.rglob("*.qmod"):
+                      if f.stat().st_mtime >= started:
+                          shutil.copy2(f, out / f.name)
+                          count += 1
+                  if count == 0:
+                      return "no qmod", "build passed but no new qmod appeared", ""
+                  return "built", f"{count} qmod file(s)", ""
+
+
+          def main():
+              rows = []
+              details = []
+              failed = 0
+              for name, url, branch in MODS:
+                  print(f"=== {name} ===", flush=True)
+                  status, note, detail = build_one(name, url, branch)
+                  print(f"{name}: {status} - {note}", flush=True)
+                  rows.append(f"| {name} | {status} | {note} |")
+                  if status != "built":
+                      failed += 1
+                      if detail:
+                          details.append(f"### {name}\n\n```\n{detail}\n```\n")
+
+              with open(SUMMARY, "a", encoding="utf-8") as s:
+                  s.write(f"## port to {PKG} (bs-cordl {CORDL})\n\n")
+                  s.write("| mod | result | note |\n|-----|--------|------|\n")
+                  s.write("\n".join(rows) + "\n\n")
+                  if failed:
+                      s.write("later mods may fail at restore until earlier ports are published.\n\n")
+                  s.write("\n".join(details))
+              sys.exit(1 if failed else 0)
+
+
+          main()
+          PY
+
+      - name: port all four
+        run: python3 port_all.py
+
+      - name: upload qmods
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ported-qmods
+          path: out/**/*.qmod
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: logs/
+          retention-days: 14
+          if-no-files-found: ignore
